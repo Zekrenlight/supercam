@@ -1,0 +1,113 @@
+id = "supercam"
+name = "SuperCam"
+version = "1.0.0"
+description = "A smooth zoom you hold (C) and scroll, a free camera you toggle (F7) that flies while your player stays put, and camera motion: leaning into strafes and turns, a dip when you run, jump or fall, a gentle sway when you stand still, and a shake from nearby explosions and lightning. Also an FOV slider (the game's own FOV) and optional breathing hands. Every part has its own switch."
+authors = ["Zekrenlight"]
+license = "MIT"
+api = "0.2"
+side = "client"
+capabilities = ["registries"]
+
+# Sunrise Mod SDK 9425651 (94256510f74, 19 Nov 2026, API 0.2, game 26.3). Mixins tool rev e59da909.
+# Almost everything goes through the typed mod API (zoom, camera pose, camera shake, input,
+# hand pose); the hook points below are pinned to this commit.
+[native]
+game = "26.3"
+sunrise = "94256510f74e6843754e0a93fd9e4da7e45b1056"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
+
+# The mouse turns the player: while the free camera is out it turns the camera instead, and the
+# player keeps looking where they were.
+[[native.mixin]]
+id = "turn"
+target = "sunrise_client::game::perspective::Game<'_>::turn_player"
+kind = "HEAD"
+cancellable = true
+helper = "src/mixins/turn.rs"
+bindings = [
+  { name = "xo", ty = "f64", value = "xo" },
+  { name = "yo", ty = "f64", value = "yo" },
+]
+
+# The FOV slider on SuperCam's page writes the game's own field of view (Options > FOV), which
+# mods can read but not set through the typed API.
+[[native.module]]
+id = "glue"
+file = "crates/sunrise-client/src/game.rs"
+name = "supercam_glue"
+source = "src/native/glue.rs"
+
+# After a setting on a mod's page changed and the mods heard it: a new FOV goes to the game.
+[[native.mixin]]
+id = "setting_changed"
+target = "sunrise_client::game::native_hooks::base::Game<'_>::native_setting_changed"
+kind = "RETURN"
+helper = "src/mixins/setting_changed.rs"
+bindings = [
+  { name = "value", ty = "()", value = "$value" },
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+]
+
+# The settings card (shared Sunrise dark card). Sunrise opens a mod's settings as its
+# Options page `NativeMod(index)` (SunnyMods' Settings button, Sunrise's Mods list and the
+# mod's own settings key all land there). These HEAD hooks act only on this mod's own page
+# and let every other page, and every other mod's card, through untouched.
+[[native.module]]
+id = "card"
+file = "crates/sunrise-client/src/game.rs"
+name = "supercam_card"
+source = "src/native/card.rs"
+
+[[native.mixin]]
+id = "card_draw"
+target = "sunrise_client::game::options::Game<'_>::draw_options"
+kind = "HEAD"
+cancellable = true
+helper = "src/mixins/card_draw.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "batch", ty = "&mut sunrise_client::hud::HudBatch", value = "&mut *batch" },
+]
+
+[[native.mixin]]
+id = "card_mouse"
+target = "sunrise_client::game::options::Game<'_>::options_mouse"
+kind = "HEAD"
+cancellable = true
+helper = "src/mixins/card_mouse.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "pressed", ty = "bool", value = "pressed" },
+  { name = "right", ty = "bool", value = "right" },
+]
+
+[[native.mixin]]
+id = "card_drag"
+target = "sunrise_client::game::options::Game<'_>::options_drag"
+kind = "HEAD"
+cancellable = true
+helper = "src/mixins/card_drag.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
+
+[[native.mixin]]
+id = "card_scroll"
+target = "sunrise_client::game::options::Game<'_>::options_scroll"
+kind = "HEAD"
+cancellable = true
+helper = "src/mixins/card_scroll.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "amount", ty = "f32", value = "amount" },
+]
+
+[[native.mixin]]
+id = "card_key"
+target = "sunrise_client::game::options::Game<'_>::options_key"
+kind = "HEAD"
+cancellable = true
+helper = "src/mixins/card_key.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "key", ty = "KeyCode", value = "key" },
+  { name = "text", ty = "Option<&str>", value = "text" },
+]
