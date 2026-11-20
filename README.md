@@ -6,6 +6,12 @@ Version 1.0.0 · Minecraft Java 26.3 · Sunrise API 0.2 · Mod SDK `9425651` · 
 Settings: Options > Mods... > SuperCam > Settings. The keys are in Options > Controls under
 SuperCam. Every part has its own switch.
 
+<img width="921" height="982" alt="image" src="https://github.com/user-attachments/assets/9e2ab0ff-bbf4-4f08-bed4-1e84f4f2c0f6" />
+<img width="921" height="982" alt="image" src="https://github.com/user-attachments/assets/c4c4c907-cc78-466f-8ab5-afc7ce7ba248" />
+<img width="921" height="982" alt="image" src="https://github.com/user-attachments/assets/1d481629-dc23-44cb-be89-fbad92194586" />
+<img width="921" height="982" alt="image" src="https://github.com/user-attachments/assets/36d184ca-348f-4772-984c-830be6e8aa7a" />
+
+
 ## Zoom
 - Hold the zoom key (C at first) to look closer; let go to come back.
 - Zoom Amount (1.5x to 10x; Sunrise allows a mod up to 10x).
