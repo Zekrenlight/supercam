@@ -26,7 +26,7 @@ pub use config::*;
 use mod_api::{
     CameraPoseEvent, CameraShakeEvent, CameraType, ClientHost, ClientLevelUnloadEvent,
     ClientTickPostEvent, Flow, Hooks, InteractionKeyMappingTriggeredEvent, KeyRegistration,
-    LoopContext, MouseScrollingEvent, MovementInputEvent, PlaySoundEvent, Registrar,
+    LoopContext, MouseScrollingEvent, MovementInputUpdateEvent, MovementKeys, PlaySoundEvent, Registrar,
     RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPreEvent,
     SettingChangedEvent, SettingSpec, ZoomEvent,
 };
@@ -228,7 +228,9 @@ pub fn freecam_takes_turn(xo: f64, yo: f64) -> bool {
 }
 
 fn held(host: &dyn ClientHost, mapping: &str) -> bool {
-    matches!(host.mapping(mapping), Ok(Some(m)) if m.down)
+    host.vanilla_key_mapping(mapping)
+        .and_then(|m| m.is_down(host))
+        .unwrap_or(false)
 }
 
 fn freecam_tick(host: &dyn ClientHost, c: &Config) {
@@ -420,7 +422,7 @@ impl Hooks for SuperCam {
         let c = cfg(host);
         let on = host.on(ID);
         // The free camera key: a press while playing (Controls can rebind it).
-        let pressed = host.consume_click(ID, FREECAM_KEY);
+        let pressed = host.mod_key_mapping(ID, FREECAM_KEY).and_then(|m| m.consume_click(host)).unwrap_or(false);
         if freecam::active() {
             if pressed || !on || !c.freecam || host.local_player().is_none() {
                 freecam_back(host);
@@ -440,7 +442,7 @@ impl Hooks for SuperCam {
         let c = cfg(host);
         let seconds = event.elapsed.as_secs_f32();
         let on = host.on(ID);
-        let held = on && host.playing() && host.is_down(ID, ZOOM_KEY);
+        let held = on && host.playing() && host.mod_key_mapping(ID, ZOOM_KEY).and_then(|m| m.is_down(host)).unwrap_or(false);
         zoom::with(|z| {
             z.hold(held, &c);
             z.step(seconds, &c);
@@ -550,20 +552,13 @@ impl Hooks for SuperCam {
         }
     }
 
-    fn movement_input(&self, _host: &dyn ClientHost, event: &mut MovementInputEvent) {
+    fn movement_input_update(&self, _host: &dyn ClientHost, event: &mut MovementInputUpdateEvent<'_>) {
         if !freecam::active() {
             return;
         }
         // The keys fly the camera: the player stands still.
-        event.forward = 0.0;
-        event.strafe = 0.0;
-        event.jump = false;
-        event.sneak = false;
-        event.forward_key = false;
-        event.backward_key = false;
-        event.left_key = false;
-        event.right_key = false;
-        event.sprint = false;
+        event.input.move_vector = [0.0, 0.0];
+        event.input.key_presses = MovementKeys::default();
     }
 
     fn interaction_key_mapping_triggered(

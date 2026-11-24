@@ -8,12 +8,12 @@ api = "0.2"
 side = "client"
 capabilities = ["registries"]
 
-# Sunrise Mod SDK 9425651 (94256510f74, 19 Nov 2026, API 0.2, game 26.3). Mixins tool rev e59da909.
+# Sunrise Mod SDK 3d34bbe (3d34bbe63d71, 24 Nov 2026, API 0.2, game 26.3). Mixins tool rev e59da909.
 # Almost everything goes through the typed mod API (zoom, camera pose, camera shake, input,
 # hand pose); the hook points below are pinned to this commit.
 [native]
 game = "26.3"
-sunrise = "94256510f74e6843754e0a93fd9e4da7e45b1056"
+sunrise = "3d34bbe63d71bb24c098c1e4021ef866be12fe2d"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
 
 # The mouse turns the player: while the free camera is out it turns the camera instead, and the
@@ -67,6 +67,7 @@ helper = "src/mixins/card_draw.rs"
 bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
   { name = "batch", ty = "&mut sunrise_client::hud::HudBatch", value = "&mut *batch" },
+  { name = "allowed", ty = "bool", value = "allowed" },
 ]
 
 [[native.mixin]]
