@@ -1,6 +1,6 @@
 id = "supercam"
 name = "SuperCam"
-version = "1.0.1"
+version = "1.0.2"
 description = "A smooth zoom you hold (C) and scroll, a free camera you toggle (F7) that flies while your player stays put, and camera motion: leaning into strafes and turns, a dip when you run, jump or fall, a gentle sway when you stand still, and a shake from nearby explosions and lightning. Also an FOV slider (the game's own FOV) and optional breathing hands. Every part has its own switch."
 authors = ["Zekrenlight"]
 license = "MIT"
