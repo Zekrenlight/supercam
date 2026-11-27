@@ -24,14 +24,17 @@ pub mod zoom;
 pub use config::*;
 
 use mod_api::{
-    CameraPoseEvent, CameraShakeEvent, CameraType, ClientHost, ClientLevelUnloadEvent,
-    ClientTickPostEvent, Flow, Hooks, InteractionKeyMappingTriggeredEvent, KeyRegistration,
-    LoopContext, MouseScrollingEvent, MovementInputUpdateEvent, MovementKeys, PlaySoundEvent, Registrar,
+    CameraPositionEvent, CameraType, ClientHost, ClientLevelUnloadEvent,
+    ClientTickPostEvent, ComputeCameraAnglesEvent, ComputeFovEvent, Flow, Hooks,
+    InteractionKeyMappingTriggeredEvent, KeyRegistration, MouseScrollingEvent,
+    MovementInputUpdateEvent, MovementKeys, PlaySoundEvent, PlayerTurnEvent, Registrar,
     RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPreEvent,
-    SettingChangedEvent, SettingSpec, ZoomEvent,
+    SettingChangedEvent, SettingKey, SettingSpec, SettingValue, Host,
 };
 use motion::{Reading, Situation};
+use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
@@ -41,35 +44,75 @@ fn label(key: &str) -> String {
     format!("supercam.setting.{key}")
 }
 
-fn toggle(registrar: &mut dyn Registrar, key: &str, default: bool) {
-    let l = label(key);
-    let tip = format!("{l}.tooltip");
-    let _ = registrar.register_setting(SettingSpec::toggle(key, l, default).tooltip(tip));
+fn remember(keys: &mut HashMap<String, SettingKey>, key: &str, k: Option<SettingKey>) {
+    if let Some(k) = k {
+        keys.insert(key.to_string(), k);
+    }
 }
 
-fn range(registrar: &mut dyn Registrar, key: &str, min: f64, max: f64, step: f64, default: f64) {
+fn toggle(registrar: &mut dyn Registrar, keys: &mut HashMap<String, SettingKey>, key: &str, default: bool) {
     let l = label(key);
     let tip = format!("{l}.tooltip");
-    let _ = registrar
-        .register_setting(SettingSpec::range(key, l, min, max, step, default).tooltip(tip));
+    remember(keys, key, registrar.register_setting(SettingSpec::toggle(key, l, default).tooltip(tip)).ok());
+}
+
+fn range(
+    registrar: &mut dyn Registrar,
+    keys: &mut HashMap<String, SettingKey>,
+    key: &str,
+    min: f64,
+    max: f64,
+    step: f64,
+    default: f64,
+) {
+    let l = label(key);
+    let tip = format!("{l}.tooltip");
+    remember(
+        keys,
+        key,
+        registrar
+            .register_setting(SettingSpec::range(key, l, min, max, step, default).tooltip(tip))
+            .ok(),
+    );
 }
 
 /// A strength in percent on the page, a fraction in the config.
-fn percent(registrar: &mut dyn Registrar, key: &str, max: f64, default: f32) {
-    range(registrar, key, 0.0, max, 10.0, f64::from((default * 100.0).round()));
+fn percent(registrar: &mut dyn Registrar, keys: &mut HashMap<String, SettingKey>, key: &str, max: f64, default: f32) {
+    range(registrar, keys, key, 0.0, max, 10.0, f64::from((default * 100.0).round()));
+}
+
+static SETTING_KEYS: OnceLock<HashMap<String, SettingKey>> = OnceLock::new();
+
+fn key_of(name: &str) -> Option<SettingKey> {
+    SETTING_KEYS.get()?.get(name).copied()
+}
+
+fn write_range(host: &mut dyn ClientHost, name: &str, value: f64) {
+    if let Some(k) = key_of(name) {
+        let _ = host.set_setting(k, SettingValue::Range(value));
+    }
+}
+
+fn bool_of(host: &dyn Host, name: &str, default: bool) -> bool {
+    key_of(name).and_then(|k| host.setting_bool(k).ok()).unwrap_or(default)
+}
+fn f32_of(host: &dyn Host, name: &str, default: f32, min: f32, max: f32) -> f32 {
+    key_of(name)
+        .and_then(|k| host.setting_f64(k).ok())
+        .filter(|v| v.is_finite())
+        .map_or(default, |v| v as f32)
+        .clamp(min, max)
+}
+fn pct_of(host: &dyn Host, name: &str, default: f32) -> f32 {
+    f32_of(host, name, default * 100.0, 0.0, 200.0) / 100.0
 }
 
 /// Reads every setting into the copy the hooks use.
-fn sync(host: &dyn ClientHost) -> Config {
+fn sync(host: &dyn Host) -> Config {
     let d = Config::default();
-    let b = |key: &str, default: bool| host.setting_bool(key).unwrap_or(default);
-    let n = |key: &str, default: f32, min: f32, max: f32| {
-        host.setting_f64(key)
-            .filter(|v| v.is_finite())
-            .map_or(default, |v| v as f32)
-            .clamp(min, max)
-    };
-    let p = |key: &str, default: f32| n(key, default * 100.0, 0.0, 200.0) / 100.0;
+    let b = |key: &str, default: bool| bool_of(host, key, default);
+    let n = |key: &str, default: f32, min: f32, max: f32| f32_of(host, key, default, min, max);
+    let p = |key: &str, default: f32| pct_of(host, key, default);
     let c = Config {
         zoom: b(KEY_ZOOM, d.zoom),
         zoom_amount: n(KEY_ZOOM_AMOUNT, d.zoom_amount, MIN_ZOOM, MAX_ZOOM),
@@ -117,7 +160,7 @@ fn sync(host: &dyn ClientHost) -> Config {
     c
 }
 
-fn cfg(host: &dyn ClientHost) -> Config {
+fn cfg(host: &dyn Host) -> Config {
     if config_loaded() {
         config()
     } else {
@@ -158,12 +201,12 @@ fn fov_pending() -> bool {
 }
 
 /// The game's FOV changed elsewhere (Options > FOV): the slider follows it.
-fn mirror_fov(host: &dyn ClientHost, c: &Config) {
+fn mirror_fov(host: &mut dyn ClientHost, c: &Config) {
     let game = host.graphics_options().fov.round();
     if fov_pending() || !game.is_finite() || (game - c.fov).abs() < 0.5 {
         return;
     }
-    host.set_setting(ID, KEY_FOV, &game.to_string());
+    write_range(host, KEY_FOV, f64::from(game));
     set_config(Config { fov: game, ..*c });
 }
 
@@ -233,7 +276,20 @@ fn held(host: &dyn ClientHost, mapping: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn block_boxes(host: &dyn ClientHost, at: [i32; 3]) -> Vec<[f64; 6]> {
+    let Some(level) = host.level(host.dimension()) else {
+        return Vec::new();
+    };
+    let mut boxes = Vec::new();
+    let _ = level.visit_block_collision(host, at, &mut |b| {
+        boxes.push(b);
+        core::ops::ControlFlow::Continue(())
+    });
+    boxes
+}
+
 fn freecam_tick(host: &dyn ClientHost, c: &Config) {
+
     let input = freecam::Input {
         forward: held(host, "key.forward"),
         back: held(host, "key.back"),
@@ -255,7 +311,7 @@ fn freecam_tick(host: &dyn ClientHost, c: &Config) {
             (lo[1]..=hi[1]).any(|y| {
                 (lo[2]..=hi[2]).any(|z| {
                     let at = [x, y, z];
-                    freecam::overlaps(min, max, at, &host.block_collision(at))
+                    freecam::overlaps(min, max, at, &block_boxes(host, at))
                 })
             })
         })
@@ -358,56 +414,64 @@ impl Hooks for SuperCam {
                 .category("supercam"),
         );
         let d = Config::default();
+        let mut keys = HashMap::new();
         // Zoom
-        toggle(registrar, KEY_ZOOM, d.zoom);
-        range(registrar, KEY_ZOOM_AMOUNT, f64::from(MIN_ZOOM), f64::from(MAX_ZOOM), 0.5, f64::from(d.zoom_amount));
-        toggle(registrar, KEY_ZOOM_SCROLL, d.zoom_scroll);
-        toggle(registrar, KEY_ZOOM_KEEP_SCROLL, d.zoom_keep_scroll);
-        toggle(registrar, KEY_ZOOM_SMOOTH, d.zoom_smooth);
-        range(registrar, KEY_ZOOM_SPEED, 1.0, 10.0, 1.0, f64::from(d.zoom_speed));
-        toggle(registrar, KEY_ZOOM_SLOW_MOUSE, d.zoom_slow_mouse);
-        toggle(registrar, KEY_ZOOM_HIDE_HAND, d.zoom_hide_hand);
+        toggle(registrar, &mut keys, KEY_ZOOM, d.zoom);
+        range(registrar, &mut keys, KEY_ZOOM_AMOUNT, f64::from(MIN_ZOOM), f64::from(MAX_ZOOM), 0.5, f64::from(d.zoom_amount));
+        toggle(registrar, &mut keys, KEY_ZOOM_SCROLL, d.zoom_scroll);
+        toggle(registrar, &mut keys, KEY_ZOOM_KEEP_SCROLL, d.zoom_keep_scroll);
+        toggle(registrar, &mut keys, KEY_ZOOM_SMOOTH, d.zoom_smooth);
+        range(registrar, &mut keys, KEY_ZOOM_SPEED, 1.0, 10.0, 1.0, f64::from(d.zoom_speed));
+        toggle(registrar, &mut keys, KEY_ZOOM_SLOW_MOUSE, d.zoom_slow_mouse);
+        toggle(registrar, &mut keys, KEY_ZOOM_HIDE_HAND, d.zoom_hide_hand);
         // Free camera
-        toggle(registrar, KEY_FREECAM, d.freecam);
-        range(registrar, KEY_FREECAM_SPEED, f64::from(MIN_FREECAM_SPEED), f64::from(MAX_FREECAM_SPEED), 1.0, f64::from(d.freecam_speed));
-        toggle(registrar, KEY_FREECAM_GLIDE, d.freecam_glide);
-        toggle(registrar, KEY_FREECAM_THROUGH, d.freecam_through);
-        toggle(registrar, KEY_FREECAM_SHOW_PLAYER, d.freecam_show_player);
+        toggle(registrar, &mut keys, KEY_FREECAM, d.freecam);
+        range(registrar, &mut keys, KEY_FREECAM_SPEED, f64::from(MIN_FREECAM_SPEED), f64::from(MAX_FREECAM_SPEED), 1.0, f64::from(d.freecam_speed));
+        toggle(registrar, &mut keys, KEY_FREECAM_GLIDE, d.freecam_glide);
+        toggle(registrar, &mut keys, KEY_FREECAM_THROUGH, d.freecam_through);
+        toggle(registrar, &mut keys, KEY_FREECAM_SHOW_PLAYER, d.freecam_show_player);
         // Camera motion
-        toggle(registrar, KEY_MOTION, d.motion);
-        toggle(registrar, KEY_MOTION_THIRD, d.motion_third);
-        range(registrar, KEY_MOTION_SMOOTH, 1.0, 10.0, 1.0, f64::from(d.motion_smooth));
-        toggle(registrar, KEY_STRAFE_ROLL, d.strafe_roll);
-        percent(registrar, KEY_STRAFE_ROLL_AMT, 200.0, d.strafe_roll_amt);
-        toggle(registrar, KEY_TURN_ROLL, d.turn_roll);
-        percent(registrar, KEY_TURN_ROLL_AMT, 200.0, d.turn_roll_amt);
-        toggle(registrar, KEY_MOVE_PITCH, d.move_pitch);
-        percent(registrar, KEY_MOVE_PITCH_AMT, 200.0, d.move_pitch_amt);
-        toggle(registrar, KEY_AIR_PITCH, d.air_pitch);
-        percent(registrar, KEY_AIR_PITCH_AMT, 200.0, d.air_pitch_amt);
-        toggle(registrar, KEY_SWAY, d.sway);
-        percent(registrar, KEY_SWAY_AMT, 200.0, d.sway_amt);
-        range(registrar, KEY_SWAY_DELAY, 1.0, 30.0, 1.0, f64::from(d.sway_delay));
-        toggle(registrar, KEY_BLAST, d.blast);
-        percent(registrar, KEY_BLAST_AMT, 200.0, d.blast_amt);
-        toggle(registrar, KEY_THUNDER, d.thunder);
-        percent(registrar, KEY_WALKING, 200.0, d.walking);
-        percent(registrar, KEY_FLYING, 200.0, d.flying);
-        percent(registrar, KEY_RIDING, 200.0, d.riding);
+        toggle(registrar, &mut keys, KEY_MOTION, d.motion);
+        toggle(registrar, &mut keys, KEY_MOTION_THIRD, d.motion_third);
+        range(registrar, &mut keys, KEY_MOTION_SMOOTH, 1.0, 10.0, 1.0, f64::from(d.motion_smooth));
+        toggle(registrar, &mut keys, KEY_STRAFE_ROLL, d.strafe_roll);
+        percent(registrar, &mut keys, KEY_STRAFE_ROLL_AMT, 200.0, d.strafe_roll_amt);
+        toggle(registrar, &mut keys, KEY_TURN_ROLL, d.turn_roll);
+        percent(registrar, &mut keys, KEY_TURN_ROLL_AMT, 200.0, d.turn_roll_amt);
+        toggle(registrar, &mut keys, KEY_MOVE_PITCH, d.move_pitch);
+        percent(registrar, &mut keys, KEY_MOVE_PITCH_AMT, 200.0, d.move_pitch_amt);
+        toggle(registrar, &mut keys, KEY_AIR_PITCH, d.air_pitch);
+        percent(registrar, &mut keys, KEY_AIR_PITCH_AMT, 200.0, d.air_pitch_amt);
+        toggle(registrar, &mut keys, KEY_SWAY, d.sway);
+        percent(registrar, &mut keys, KEY_SWAY_AMT, 200.0, d.sway_amt);
+        range(registrar, &mut keys, KEY_SWAY_DELAY, 1.0, 30.0, 1.0, f64::from(d.sway_delay));
+        toggle(registrar, &mut keys, KEY_BLAST, d.blast);
+        percent(registrar, &mut keys, KEY_BLAST_AMT, 200.0, d.blast_amt);
+        toggle(registrar, &mut keys, KEY_THUNDER, d.thunder);
+        percent(registrar, &mut keys, KEY_WALKING, 200.0, d.walking);
+        percent(registrar, &mut keys, KEY_FLYING, 200.0, d.flying);
+        percent(registrar, &mut keys, KEY_RIDING, 200.0, d.riding);
         // FOV
-        range(registrar, KEY_FOV, f64::from(MIN_FOV), f64::from(MAX_FOV), 1.0, f64::from(d.fov));
+        range(registrar, &mut keys, KEY_FOV, f64::from(MIN_FOV), f64::from(MAX_FOV), 1.0, f64::from(d.fov));
         // Breathing hands
-        toggle(registrar, KEY_BREATHING, d.breathing);
-        percent(registrar, KEY_BREATHING_AMT, 200.0, d.breathing_amt);
-        range(registrar, KEY_BREATHING_SPEED, 1.0, 10.0, 1.0, f64::from(d.breathing_speed));
+        toggle(registrar, &mut keys, KEY_BREATHING, d.breathing);
+        percent(registrar, &mut keys, KEY_BREATHING_AMT, 200.0, d.breathing_amt);
+        range(registrar, &mut keys, KEY_BREATHING_SPEED, 1.0, 10.0, 1.0, f64::from(d.breathing_speed));
         // The accent colour of supercam's cards (Sunrise orange by default).
-        let _ = registrar.register_setting(
-            mod_api::SettingSpec::color("accent", "supercam.setting.accent", 0xF9801D)
-                .tooltip("supercam.setting.accent.tooltip"),
+        remember(
+            &mut keys,
+            "accent",
+            registrar
+                .register_setting(
+                    mod_api::SettingSpec::color("accent", "supercam.setting.accent", 0xF9801D)
+                        .tooltip("supercam.setting.accent.tooltip"),
+                )
+                .ok(),
         );
+        let _ = SETTING_KEYS.set(keys);
     }
 
-    fn setting_changed(&self, host: &mut dyn ClientHost, event: &mut SettingChangedEvent<'_>) {
+    fn setting_changed(&self, host: &dyn Host, event: &mut SettingChangedEvent<'_>) {
         if event.mod_id == ID {
             let c = sync(host);
             if event.key == KEY_FOV {
@@ -457,16 +521,21 @@ impl Hooks for SuperCam {
         hands::with(|b| b.frame(seconds, busy, &c));
     }
 
-    fn zoom(&self, _host: &dyn ClientHost, _event: &mut ZoomEvent) -> Option<mod_api::Zoom> {
+    fn compute_fov(&self, _host: &dyn ClientHost, event: &mut ComputeFovEvent) {
+        let factor = zoom::with(|z| z.now);
+        if factor > 1.001 && factor.is_finite() {
+            let degrees = event.degrees / factor;
+            if degrees.is_finite() && (1.0..=179.0).contains(&degrees) {
+                event.degrees = degrees;
+            }
+        }
+    }
+
+    fn player_turn(&self, _host: &dyn ClientHost, event: &mut PlayerTurnEvent) {
         let c = config();
-        zoom::with(|z| {
-            z.zoomed().then(|| mod_api::Zoom {
-                factor: z.now,
-                // SuperCam eases the zoom itself, at its own speed.
-                smooth: false,
-                turn: z.turn(&c),
-            })
-        })
+        let turn = zoom::with(|z| z.turn(&c));
+        event.x *= f64::from(turn);
+        event.y *= f64::from(turn);
     }
 
     fn mouse_scrolling(&self, host: &mut dyn ClientHost, event: &mut MouseScrollingEvent) -> Flow {
@@ -490,7 +559,7 @@ impl Hooks for SuperCam {
             let speed = (c.freecam_speed * 1.15f32.powf(notches))
                 .clamp(MIN_FREECAM_SPEED, MAX_FREECAM_SPEED)
                 .round();
-            host.set_setting(ID, KEY_FREECAM_SPEED, &speed.to_string());
+            write_range(host, KEY_FREECAM_SPEED, f64::from(speed));
             set_config(Config {
                 freecam_speed: speed,
                 ..c
@@ -526,30 +595,46 @@ impl Hooks for SuperCam {
         }
     }
 
-    fn camera_pose(&self, _host: &dyn ClientHost, event: &mut CameraPoseEvent<'_>) {
-        let posed = freecam::with(|c| c.map(|cam| (cam.at(event.partial), cam.yaw, cam.pitch)));
-        if let Some((at, yaw, pitch)) = posed {
-            *event.position = at;
+    fn compute_camera_angles(&self, host: &dyn ClientHost, event: &mut ComputeCameraAnglesEvent) {
+        let posed = freecam::with(|c| c.map(|cam| (cam.yaw, cam.pitch)));
+        if let Some((yaw, pitch)) = posed {
             event.yaw = yaw;
             event.pitch = pitch;
+            return;
         }
-    }
-
-    fn camera_shake(&self, host: &dyn ClientHost, event: &mut CameraShakeEvent<'_>) {
         let c = config();
-        if !c.motion || freecam::active() || !host.on(ID) {
+        if !c.motion || !host.on(ID) {
             return;
         }
         if !c.motion_third && !host.camera_type().is_first_person() {
             return;
         }
-        let (a, offset) = motion::with(|m| (m.out, m.out_offset));
-        event.shake.pitch += a.pitch;
-        event.shake.yaw += a.yaw;
-        event.shake.roll += a.roll;
-        for i in 0..3 {
-            event.shake.offset[i] += offset[i];
+        let a = motion::with(|m| m.out);
+        event.pitch += a.pitch;
+        event.yaw += a.yaw;
+        event.roll += a.roll;
+    }
+
+    fn camera_position(&self, host: &dyn ClientHost, event: &mut CameraPositionEvent<'_>) {
+        let posed = freecam::with(|c| c.map(|cam| cam.at(event.partial)));
+        if let Some(at) = posed {
+            let _ = event.position.set([Some(at[0]), Some(at[1]), Some(at[2])]);
+            return;
         }
+        let c = config();
+        if !c.motion || !host.on(ID) {
+            return;
+        }
+        if !c.motion_third && !host.camera_type().is_first_person() {
+            return;
+        }
+        let offset = motion::with(|m| m.out_offset);
+        let at = event.position.coordinates();
+        let _ = event.position.set([
+            Some(at[0] + f64::from(offset[0])),
+            Some(at[1] + f64::from(offset[1])),
+            Some(at[2] + f64::from(offset[2])),
+        ]);
     }
 
     fn movement_input_update(&self, _host: &dyn ClientHost, event: &mut MovementInputUpdateEvent<'_>) {
@@ -575,7 +660,7 @@ impl Hooks for SuperCam {
         }
     }
 
-    fn play_sound(&self, _context: &dyn LoopContext, event: &mut PlaySoundEvent<'_>) {
+    fn play_sound(&self, _host: &mut dyn ClientHost, event: &mut PlaySoundEvent<'_>) {
         if !event.starting || event.original.relative {
             return;
         }
